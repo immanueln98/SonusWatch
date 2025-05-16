@@ -2,13 +2,12 @@
 #define TINY_GSM_MODEM_SIM7600  // Compatible with A7670
 #define TINY_GSM_USE_GPRS true
 
-// Serial configuration
-#define SerialAT Serial1
+// Serial configuration - USING SINGLE SERIAL PORT FOR BOTH AT COMMANDS AND GPS
 #define SerialMon Serial
 #define RXD2 17   
 #define TXD2 18    
 #define powerPin 4 
-#define STASSID "SAVITAR"
+#define STASSID "SVITAR"
 #define STAPSK "L1l1anj13!!"
 
 // Include necessary libraries
@@ -17,18 +16,27 @@
 #include <TinyGPS++.h>
 #include <HardwareSerial.h>
 #include <ArduinoJson.h>
-#include <WiFiClientSecure.h>
-#include <Wire.h>
 #include <WiFi.h>
+
+// Initialize single serial for modem
+HardwareSerial cellSerial(1); // Use UART1 for all communication with A7670E
+
+// Module state management
+enum ModuleState {
+  STATE_GSM_COMMAND,  // Using AT commands for GSM
+  STATE_GPS_DATA      // Reading GPS NMEA data
+};
+ModuleState currentState = STATE_GSM_COMMAND;
+unsigned long stateChangeTime = 0;
+const unsigned long STATE_SWITCH_DELAY = 1000; // 1 second delay when switching states
 
 // Initialize objects
 const char *ssid = STASSID;
 const char *password = STAPSK;
-TinyGsm modem(SerialAT);
+TinyGsm modem(cellSerial);
 TinyGsmClient gsmClient(modem);
 WiFiClient espClient;
-// PubSubClient mqttClient(gsmClient);
-PubSubClient mqttClient(espClient);
+PubSubClient mqttClient(espClient); // Default to WiFi, will switch if needed
 TinyGPSPlus gps;
 
 // Network credentials
@@ -36,51 +44,12 @@ const char apn[] = "";  // Leave blank for auto-detection
 const char gprsUser[] = "";
 const char gprsPass[] = "";
 
-// HiveMQ Cloud Configuration
-const char* mqtt_server = "mqtt.waveshare.cloud";  // test.mosquito
-const int mqtt_port = 1883;  // TLS port
+// MQTT Configuration
+const char* mqtt_server = "mqtt.waveshare.cloud";
+const int mqtt_port = 1883;
 const char* mqtt_client_id = "f66194fa";
 const char* mqtt_topic = "Pub/955/37/f66194fa";
 const char* sub = "Sub/955/37/f66194fa";
-const char* mqtt_user = ""; 
-const char* mqtt_pass = "";
-
-// HiveMQ Cloud Root CA Certificate (ISRG Root X1)
-const char* root_ca = \
-"-----BEGIN CERTIFICATE-----\n" \
-"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\n" \
-"-----END CERTIFICATE-----\n";
-// GPS Configuration
-HardwareSerial gpsSerial(2);  // Use UART2 for GPS data
-const uint32_t GPSBaud = 9600;
 
 // JSON buffer for sending data
 StaticJsonDocument<256> gpsJson;
@@ -90,13 +59,42 @@ unsigned long lastGPSUpdate = 0;
 unsigned long lastMQTTSend = 0;
 const unsigned long GPS_UPDATE_INTERVAL = 1000;  // Read GPS every 1 second
 const unsigned long MQTT_SEND_INTERVAL = 5000;   // Send to MQTT every 5 seconds
+bool useGSM = false;  // Flag to determine which connection method to use
+
+// Function to switch to AT command mode
+void switchToATMode() {
+  if (currentState == STATE_GPS_DATA) {
+    SerialMon.println("Switching to AT command mode");
+    // Clear any pending data
+    while(cellSerial.available()) cellSerial.read();
+    currentState = STATE_GSM_COMMAND;
+    stateChangeTime = millis();
+  }
+}
+
+// Function to switch to GPS data mode
+void switchToGPSMode() {
+  if (currentState == STATE_GSM_COMMAND) {
+    SerialMon.println("Switching to GPS data mode");
+    // Enable NMEA output if not already enabled
+    modem.sendAT("+CGNSSPORTSWITCH=0,1");
+    modem.waitResponse(3000);
+    // Clear any pending AT command responses
+    while(cellSerial.available()) cellSerial.read();
+    currentState = STATE_GPS_DATA;
+    stateChangeTime = millis();
+  }
+}
 
 bool initModem() {
   SerialMon.println("Initializing modem...");
   
   // Configure Serial for modem
-  SerialAT.begin(115200, SERIAL_8N1, RXD2, TXD2);
+  cellSerial.begin(115200, SERIAL_8N1, RXD2, TXD2);
   delay(3000);
+  
+  // Ensure we're in AT command mode
+  currentState = STATE_GSM_COMMAND;
   
   // Test AT communication
   SerialMon.println("Testing modem communication...");
@@ -121,6 +119,14 @@ bool initModem() {
 }
 
 bool connectGPRS() {
+  // Make sure we're in AT command mode
+  switchToATMode();
+  
+  // Wait for state switch delay
+  if (millis() - stateChangeTime < STATE_SWITCH_DELAY) {
+    delay(STATE_SWITCH_DELAY);
+  }
+  
   SerialMon.print("Waiting for network...");
   if (!modem.waitForNetwork()) {
     SerialMon.println(" fail");
@@ -143,6 +149,7 @@ bool connectGPRS() {
   
   if (modem.isGprsConnected()) {
     SerialMon.println("GPRS connected");
+    useGSM = true;
     String ccid = modem.getSimCCID();
     SerialMon.print("CCID: ");
     SerialMon.println(ccid);
@@ -151,9 +158,16 @@ bool connectGPRS() {
   return true;
 }
 
-//GPS Initializaiton and Control Funtions
 bool initGPS() {
   SerialMon.println("Initializing GPS...");
+  
+  // Make sure we're in AT command mode
+  switchToATMode();
+  
+  // Wait for state switch delay
+  if (millis() - stateChangeTime < STATE_SWITCH_DELAY) {
+    delay(STATE_SWITCH_DELAY);
+  }
   
   // Power on GPS
   modem.sendAT("+CGNSSPWR=1");
@@ -177,20 +191,28 @@ bool initGPS() {
     return false;
   }
   
-  // Initialize GPS serial
-  gpsSerial.begin(GPSBaud, SERIAL_8N1, RXD2, TXD2);
-  
   SerialMon.println("GPS initialized");
+  
+  // Now switch to GPS mode to start reading NMEA data
+  switchToGPSMode();
+  
   return true;
 }
 
 void readGPS() {
-  while (gpsSerial.available() > 0) {
-    gps.encode(gpsSerial.read());
+  // Make sure we're in GPS data mode
+  if (currentState != STATE_GPS_DATA) {
+    switchToGPSMode();
+    return; // Wait for next loop iteration
+  }
+  
+  // Read GPS data
+  while (cellSerial.available() > 0) {
+    char c = cellSerial.read();
+    gps.encode(c);
   }
 }
 
-//MQTT FUNCTIONS
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   SerialMon.print("Message arrived [");
   SerialMon.print(topic);
@@ -201,37 +223,17 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   SerialMon.println();
 }
 
-bool mqttConnect() {
-  SerialMon.print("Connecting to MQTT...");
-
-    // Set SSL/TLS options
-  // gsmClient.setCACert(root_ca);
+void reconnect() {
+  // Switch to appropriate client
+  if (useGSM && modem.isGprsConnected()) {
+    mqttClient.setClient(gsmClient);
+  } else {
+    mqttClient.setClient(espClient);
+  }
   
-  // Configure MQTT
   mqttClient.setServer(mqtt_server, mqtt_port);
   mqttClient.setCallback(mqttCallback);
-  return true;
   
-  
-  // SerialMon.print("Server Connected...");
-  
-  // SerialMon.print("Callback set...");
-
-  // return false;
-  
-  // Connect to MQTT broker
-  // if (mqttClient.connect(mqtt_client_id, mqtt_user, mqtt_pass)) {
-  //   SerialMon.println(" success");
-  //   // Subscribe to topics if needed
-  //   // mqttClient.subscribe("gps/commands");
-  //   return true;
-  // } else {
-  //   SerialMon.print(" failed, rc=");
-  //   SerialMon.println(mqttClient.state());
-  //   return false;
-  // }
-}
-void reconnect() {
   while (!mqttClient.connected()) {
     Serial.print("MQTT not connected.. Trying to connect");
 
@@ -246,6 +248,12 @@ void reconnect() {
 }
 
 void sendGPSData() {
+  // Temporarily switch to AT command mode if needed for MQTT operations
+  if (useGSM && currentState == STATE_GPS_DATA) {
+    switchToATMode();
+    delay(100); // Small delay to ensure switch
+  }
+  
   if (gps.location.isValid()) {
     // Prepare JSON data
     gpsJson.clear();
@@ -277,6 +285,11 @@ void sendGPSData() {
     } else {
       SerialMon.println("Failed to send GPS data");
     }
+  }
+  
+  // Switch back to GPS mode after sending
+  if (useGSM) {
+    switchToGPSMode();
   }
 }
 
@@ -326,45 +339,72 @@ void setup() {
     while (1) delay(1000);
   }
   
-  // Connect to cellular network
-  // if (!connectGPRS()) {
-  //   SerialMon.println("GPRS connection failed!");
-  //   while (1) delay(1000);
-  // }
+  // Try WiFi first
+  // setup_wifi();
+  
+  // As fallback, try GSM
+  if (WiFi.status() != WL_CONNECTED) {
+    // Connect to cellular network
+    if (!connectGPRS()) {
+      SerialMon.println("GPRS connection failed!");
+      // Continue anyway, will retry in loop
+    } else {
+      useGSM = true;
+    }
+  }
   
   // Initialize GPS
   if (!initGPS()) {
     SerialMon.println("GPS initialization failed!");
     while (1) delay(1000);
   }
-  //WIFI setup
-
-  setup_wifi();
+  
   // Connect to MQTT broker
-  if (!mqttConnect()) {
-    SerialMon.println("MQTT connection failed!");
-    // Continue anyway, will retry in loop
-  }
+  reconnect();
   
   SerialMon.println("Setup complete!");
 }
 
 void loop() {
-  // Check GPRS connection
-  // if (!modem.isGprsConnected()) {
-  //   SerialMon.println("GPRS disconnected! Reconnecting...");
-  //   if (!connectGPRS()) {
-  //     delay(10000);
-  //     return;
-  //   }
-  // }
+  // Check connection status
+  if (useGSM) {
+    // If using GSM, check GPRS connection
+    if (!modem.isGprsConnected()) {
+      SerialMon.println("GPRS disconnected! Reconnecting...");
+      useGSM = false; // Reset flag
+      
+      // Try WiFi instead
+      if (WiFi.status() != WL_CONNECTED) {
+        setup_wifi();
+      }
+      
+      // If WiFi still not available, try GSM again
+      if (WiFi.status() != WL_CONNECTED) {
+        if (connectGPRS()) {
+          useGSM = true;
+        } else {
+          delay(10000);
+          return;
+        }
+      }
+    }
+  } else {
+    // If using WiFi, check WiFi connection
+    if (WiFi.status() != WL_CONNECTED) {
+      SerialMon.println("WiFi disconnected! Reconnecting...");
+      setup_wifi();
+      
+      // If WiFi reconnection fails, try GSM
+      if (WiFi.status() != WL_CONNECTED && !useGSM) {
+        if (connectGPRS()) {
+          useGSM = true;
+        }
+      }
+    }
+  }
   
   // Check MQTT connection
   if (!mqttClient.connected()) {
-    // if (!mqttConnect()) {
-    //   delay(5000);
-    //   return;
-    // }
     reconnect();
   }
   mqttClient.loop();
@@ -385,4 +425,3 @@ void loop() {
   // Small delay to prevent watchdog issues
   delay(100);
 }
-
