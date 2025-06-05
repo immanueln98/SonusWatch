@@ -7,6 +7,7 @@
 #define RXD2 17   
 #define TXD2 18    
 #define powerPin 4 
+// Set Wi-Fi Username and Password
 #define STASSID "SVITAR"
 #define STAPSK "L1l1anj13!!"
 
